@@ -133,6 +133,7 @@ class Worker(LocalOrDistributedWorkerBase):
                     torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+        self.preoccupied_mem = None
 
     def start_profile(self):
         if self.profiler is None:
@@ -226,9 +227,12 @@ class Worker(LocalOrDistributedWorkerBase):
         # profiled peak memory.
         torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        self.preoccupied_mem = total_gpu_memory - free_gpu_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_gpu_memory - free_gpu_memory
+        #peak_memory = self.init_gpu_memory - free_gpu_memory
+        peak_memory = max(total_gpu_memory - free_gpu_memory - self.preoccupied_mem, 0)
+        
         assert peak_memory > 0, (
             "Error in memory profiling. "
             f"Initial free memory {self.init_gpu_memory}, current free memory"
