@@ -218,6 +218,7 @@ class Worker(LocalOrDistributedWorkerBase):
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -227,11 +228,9 @@ class Worker(LocalOrDistributedWorkerBase):
         # profiled peak memory.
         torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
-        self.preoccupied_mem = total_gpu_memory - free_gpu_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        #peak_memory = self.init_gpu_memory - free_gpu_memory
-        peak_memory = max(total_gpu_memory - free_gpu_memory - self.preoccupied_mem, 0)
+        peak_memory = torch.cuda.max_memory_allocated()
         
         assert peak_memory > 0, (
             "Error in memory profiling. "
