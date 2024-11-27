@@ -200,7 +200,8 @@ class Worker(LocalOrDistributedWorkerBase):
         self._assert_memory_footprint_increased_during_profiling()
 
         # Get the peak memory allocation recorded by torch
-        peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        # peak_memory = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        peak_memory = torch.cuda.max_memory_allocated()
 
         # Check for any memory left around that may have been allocated on the
         # gpu outside of `torch`. NCCL operations, for example, can use a few
