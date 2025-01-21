@@ -28,7 +28,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
                                              RWConfig, SolarConfig,
-                                             UltravoxConfig)
+                                             UltravoxConfig, OcisMllamaConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 
@@ -42,7 +42,8 @@ MISTRAL_CONFIG_NAME = "params.json"
 logger = init_logger(__name__)
 
 _CONFIG_REGISTRY_OVERRIDE_HF: Dict[str, Type[PretrainedConfig]] = {
-    "mllama": MllamaConfig
+    "mllama": MllamaConfig,
+    "ocismllama": OcisMllamaConfig,
 }
 
 _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
