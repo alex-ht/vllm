@@ -1109,10 +1109,10 @@ class EngineArgs:
         )
 
         max_model_len = model_config.max_model_len
-        use_long_context = max_model_len > 32768
+        use_long_context = max_model_len > 65536
         if self.enable_chunked_prefill is None:
             # If not explicitly set, enable chunked prefill by default for
-            # long context (> 32K) models. This is to avoid OOM errors in the
+            # long context (> 64K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
 
             # For multimodal models, chunked prefill is disabled by default in
@@ -1134,7 +1134,7 @@ class EngineArgs:
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
-                        "max_model_len > 32K. Currently, chunked prefill might "
+                        "max_model_len > 64K. Currently, chunked prefill might "
                         "not work with some features or models. If you "
                         "encounter any issues, please disable chunked prefill "
                         "by setting --enable-chunked-prefill=False.")
