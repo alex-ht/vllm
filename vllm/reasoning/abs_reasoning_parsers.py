@@ -174,6 +174,15 @@ class ReasoningParser:
         """Adjust request parameters; override in subclasses as needed."""
         return request
 
+    def get_control_token_ids(self) -> set[int]:
+        """Return reasoning-related control token ids that should be isolated
+        as standalone streaming sub-deltas before parser dispatch.
+
+        The default implementation returns an empty set so existing parsers
+        remain unchanged unless they explicitly opt in.
+        """
+        return set()
+
     def prepare_structured_tag(
         self,
         original_tag: str | None,

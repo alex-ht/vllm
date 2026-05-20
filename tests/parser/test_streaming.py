@@ -7,7 +7,10 @@ import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.parser.abstract_parser import _WrappedParser
+from vllm.parser.abstract_parser import (
+    _WrappedParser,
+    split_delta_by_control_token_ids,
+)
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
@@ -20,6 +23,34 @@ class ThinkReasoningParser(BaseThinkingReasoningParser):
     @property
     def end_token(self) -> str:
         return "</think>"
+
+
+class RecordingThinkReasoningParser(ThinkReasoningParser):
+    def __init__(self, tokenizer):
+        super().__init__(tokenizer)
+        self.seen_delta_token_ids: list[list[int]] = []
+
+    def get_control_token_ids(self) -> set[int]:
+        return {self.start_token_id, self.end_token_id}
+
+    def extract_reasoning_streaming(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: list[int],
+        current_token_ids: list[int],
+        delta_token_ids: list[int],
+    ):
+        self.seen_delta_token_ids.append(list(delta_token_ids))
+        return super().extract_reasoning_streaming(
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
+        )
 
 
 MODEL_OUTPUT = (
@@ -163,3 +194,56 @@ def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
     assert "Hello" in content
     assert "assist" in content
     assert len(tool_calls) == 0
+
+
+def test_split_delta_by_control_token_ids_isolates_reasoning_markers(tokenizer):
+    reasoning_parser = RecordingThinkReasoningParser(tokenizer)
+    text = "<think>let me think</think>Answer"
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+
+    sub_deltas = split_delta_by_control_token_ids(
+        tokenizer,
+        token_ids,
+        reasoning_parser.get_control_token_ids(),
+    )
+
+    assert len(sub_deltas) >= 4
+    for sub_delta in sub_deltas:
+        if (
+            reasoning_parser.start_token_id in sub_delta.token_ids
+            or reasoning_parser.end_token_id in sub_delta.token_ids
+        ):
+            assert len(sub_delta.token_ids) == 1
+
+
+def test_parse_delta_splits_control_tokens_before_reasoning_parser(
+    tokenizer, request_obj
+):
+    _WrappedParser.reasoning_parser_cls = RecordingThinkReasoningParser
+    _WrappedParser.tool_parser_cls = None
+    parser = _WrappedParser(tokenizer)
+
+    text = "<think>let me think</think>Answer"
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    result = parser.parse_delta(text, token_ids, request_obj, prompt_token_ids=[])
+
+    reasoning_parser = parser._reasoning_parser
+    assert isinstance(reasoning_parser, RecordingThinkReasoningParser)
+    assert any(
+        token_ids == [reasoning_parser.start_token_id]
+        for token_ids in reasoning_parser.seen_delta_token_ids
+    )
+    assert any(
+        token_ids == [reasoning_parser.end_token_id]
+        for token_ids in reasoning_parser.seen_delta_token_ids
+    )
+    for token_ids in reasoning_parser.seen_delta_token_ids:
+        if (
+            reasoning_parser.start_token_id in token_ids
+            or reasoning_parser.end_token_id in token_ids
+        ):
+            assert len(token_ids) == 1
+
+    assert result is not None
+    assert "let me think" in (result.reasoning or "")
+    assert "Answer" in (result.content or "")

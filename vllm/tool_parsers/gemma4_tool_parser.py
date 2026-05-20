@@ -401,6 +401,12 @@ class Gemma4ToolParser(ToolParser):
             request.skip_special_tokens = False
         return request
 
+    def get_control_token_ids(self) -> set[int]:
+        token_ids = {self.tool_call_start_token_id}
+        if self.tool_call_end_token_id is not None:
+            token_ids.add(self.tool_call_end_token_id)
+        return token_ids
+
     # ------------------------------------------------------------------
     # Delta buffering for multi-token special sequences
     # ------------------------------------------------------------------

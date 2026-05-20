@@ -167,6 +167,15 @@ class ToolParser:
             "AbstractToolParser.extract_tool_calls has not been implemented!"
         )
 
+    def get_control_token_ids(self) -> set[int]:
+        """Return tool-related control token ids that should be isolated as
+        standalone streaming sub-deltas before parser dispatch.
+
+        The default implementation returns an empty set so existing parsers
+        remain unchanged unless they explicitly opt in.
+        """
+        return set()
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,

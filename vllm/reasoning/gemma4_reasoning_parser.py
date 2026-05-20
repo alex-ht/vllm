@@ -63,6 +63,15 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         request.skip_special_tokens = False
         return request
 
+    def get_control_token_ids(self) -> set[int]:
+        return {
+            self.start_token_id,
+            self.end_token_id,
+            self.new_turn_token_id,
+            self.tool_call_token_id,
+            self.tool_response_token_id,
+        }
+
     @property
     def start_token(self) -> str:
         """The token that starts reasoning content."""

@@ -64,6 +64,61 @@ class StreamState:
     function_name_returned: bool = False
 
 
+@dataclass(frozen=True)
+class StreamSubDelta:
+    """A parser-facing streaming sub-delta with isolated control tokens."""
+
+    text: str
+    token_ids: list[int]
+    start_idx: int
+    end_idx: int
+
+
+def split_delta_by_control_token_ids(
+    tokenizer: TokenizerLike,
+    token_ids: Sequence[int],
+    control_token_ids: set[int],
+) -> list[StreamSubDelta]:
+    """Split a streamed delta so each control token becomes its own sub-delta.
+
+    This gives downstream streaming parsers stable boundaries even when the
+    serving/runtime layer batches multiple tokens into one delta.
+    """
+    token_ids = list(token_ids)
+    if not token_ids:
+        return []
+    if not control_token_ids:
+        return [
+            StreamSubDelta(
+                text=tokenizer.decode(token_ids, skip_special_tokens=False),
+                token_ids=token_ids,
+                start_idx=0,
+                end_idx=len(token_ids),
+            )
+        ]
+
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for i, token_id in enumerate(token_ids):
+        if token_id in control_token_ids:
+            if start < i:
+                ranges.append((start, i))
+            ranges.append((i, i + 1))
+            start = i + 1
+    if start < len(token_ids):
+        ranges.append((start, len(token_ids)))
+
+    return [
+        StreamSubDelta(
+            text=tokenizer.decode(token_ids[s:e], skip_special_tokens=False),
+            token_ids=token_ids[s:e],
+            start_idx=s,
+            end_idx=e,
+        )
+        for s, e in ranges
+    ]
+
+
 class Parser:
     """
     Abstract Parser class that unifies ReasoningParser and ToolParser into
@@ -107,6 +162,15 @@ class Parser:
     def vocab(self) -> dict[str, int]:
         """Get the vocabulary mapping from tokens to IDs."""
         return self.model_tokenizer.get_vocab()
+
+    def get_streaming_control_token_ids(self) -> set[int]:
+        """Return parser-relevant control token ids to isolate per sub-delta."""
+        token_ids: set[int] = set()
+        if self._reasoning_parser is not None:
+            token_ids.update(self._reasoning_parser.get_control_token_ids())
+        if self._tool_parser is not None:
+            token_ids.update(self._tool_parser.get_control_token_ids())
+        return token_ids
 
     @property
     def reasoning_parser(self) -> ReasoningParser | None:
@@ -649,7 +713,29 @@ class DelegatingParser(Parser):
             return False
         return state.reasoning_ended
 
-    def parse_delta(
+    @staticmethod
+    def _merge_delta_messages(
+        delta_messages: Sequence[DeltaMessage | None],
+    ) -> DeltaMessage | None:
+        merged: DeltaMessage | None = None
+        for delta_message in delta_messages:
+            if delta_message is None:
+                continue
+            if merged is None:
+                merged = DeltaMessage()
+            if delta_message.role is not None:
+                merged.role = delta_message.role
+            if delta_message.content:
+                merged.content = (merged.content or "") + delta_message.content
+            if delta_message.reasoning:
+                merged.reasoning = (
+                    (merged.reasoning or "") + delta_message.reasoning
+                )
+            if delta_message.tool_calls:
+                merged.tool_calls.extend(delta_message.tool_calls)
+        return merged
+
+    def _parse_single_delta(
         self,
         delta_text: str,
         delta_token_ids: list[int],
@@ -730,6 +816,42 @@ class DelegatingParser(Parser):
         state.previous_text = current_text
         state.previous_token_ids = current_token_ids
         return delta_message
+
+    def parse_delta(
+        self,
+        delta_text: str,
+        delta_token_ids: list[int],
+        request: ChatCompletionRequest | ResponsesRequest,
+        prompt_token_ids: list[int] | None = None,
+    ) -> DeltaMessage | None:
+        control_token_ids = self.get_streaming_control_token_ids()
+        if len(delta_token_ids) > 1 and control_token_ids:
+            sub_deltas = split_delta_by_control_token_ids(
+                self.model_tokenizer,
+                delta_token_ids,
+                control_token_ids,
+            )
+            if len(sub_deltas) > 1:
+                delta_messages: list[DeltaMessage | None] = []
+                next_prompt_token_ids = prompt_token_ids
+                for sub_delta in sub_deltas:
+                    delta_messages.append(
+                        self._parse_single_delta(
+                            delta_text=sub_delta.text,
+                            delta_token_ids=sub_delta.token_ids,
+                            request=request,
+                            prompt_token_ids=next_prompt_token_ids,
+                        )
+                    )
+                    next_prompt_token_ids = None
+                return self._merge_delta_messages(delta_messages)
+
+        return self._parse_single_delta(
+            delta_text=delta_text,
+            delta_token_ids=delta_token_ids,
+            request=request,
+            prompt_token_ids=prompt_token_ids,
+        )
 
 
 class _WrappedParser(DelegatingParser):
