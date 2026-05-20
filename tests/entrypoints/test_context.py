@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -8,10 +9,12 @@ from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm.entrypoints.openai.responses.context import (
     HarmonyContext,
+    ParsableContext,
     SimpleContext,
     StreamingHarmonyContext,
     TurnMetrics,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.outputs import CompletionOutput, RequestOutput
 
 
@@ -641,6 +644,25 @@ def test_turn_metrics_copy_and_reset():
 # ==================== SimpleContext Tests ====================
 
 
+class FakeTokenizer:
+    def decode(self, ids, skip_special_tokens=False):
+        if isinstance(ids, int):
+            ids = [ids]
+        mapping = {
+            (1,): "alpha",
+            (2,): "beta",
+            (3,): "gamma",
+            (4,): "delta",
+            (1, 2): "alphabeta",
+            (1, 2, 3): "alphabetagamma",
+            (3, 4): "gammadelta",
+            (10,): "<|channel|>",
+            (11,): "thought\\n",
+            (10, 11): "thought\\n",
+        }
+        return mapping.get(tuple(ids), "".join(f"tok{tid}" for tid in ids))
+
+
 def create_simple_context_output(
     text="",
     token_ids=None,
@@ -749,6 +771,26 @@ def test_simple_context_output_messages_many_deltas():
     assert len(messages) == 1
     assert messages[0].message == "The quick brown fox jumps"
     assert messages[0].tokens == [100, 101, 102, 103, 104]
+
+
+def test_simple_context_prefers_decoding_accumulated_token_ids():
+    context = SimpleContext(tokenizer=FakeTokenizer())
+    context.append_output(
+        create_simple_context_output(text="BAD_A", token_ids=[1], prompt_token_ids=[9])
+    )
+    context.append_output(
+        create_simple_context_output(text="BAD_B", token_ids=[2], prompt_token_ids=[9])
+    )
+
+    messages = context.output_messages
+    assert len(messages) == 1
+    assert messages[0].message == "alphabeta"
+    assert messages[0].tokens == [1, 2]
+
+    final = context.final_output
+    assert final is not None
+    assert final.outputs[0].text == "alphabeta"
+    assert final.outputs[0].token_ids == (1, 2)
 
 
 def test_simple_context_input_messages():
@@ -881,3 +923,75 @@ def test_simple_context_output_messages_no_mutation():
     assert len(msgs3) == 1
     assert msgs3[0].message == "hello world"
     assert msgs3[0].tokens == [1, 2]
+
+
+def test_parsable_context_output_messages_consolidate_deltas_per_turn():
+    fake_parser = SimpleNamespace(
+        process=lambda output: None,
+        response_messages=[],
+    )
+    request = ResponsesRequest(input="hi", tools=[], enable_response_messages=True)
+
+    with patch(
+        "vllm.entrypoints.openai.responses.context.get_responses_parser_for_simple_context",
+        return_value=fake_parser,
+    ):
+        context = ParsableContext(
+            response_messages=[],
+            tokenizer=FakeTokenizer(),
+            reasoning_parser_cls=MagicMock(),
+            request=request,
+            available_tools=[],
+            tool_parser_cls=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+
+    context.append_output(
+        create_simple_context_output(
+            text="BAD_A",
+            token_ids=[1],
+            prompt="Prompt 1",
+            prompt_token_ids=[100],
+            finished=False,
+        )
+    )
+    context.append_output(
+        create_simple_context_output(
+            text="BAD_B",
+            token_ids=[2],
+            prompt="Prompt 1",
+            prompt_token_ids=[100],
+            finished=True,
+        )
+    )
+    context.append_output(
+        create_simple_context_output(
+            text="BAD_C",
+            token_ids=[3],
+            prompt="Prompt 2",
+            prompt_token_ids=[200],
+            finished=False,
+        )
+    )
+    context.append_output(
+        create_simple_context_output(
+            text="BAD_D",
+            token_ids=[4],
+            prompt="Prompt 2",
+            prompt_token_ids=[200],
+            finished=True,
+        )
+    )
+
+    assert len(context.input_messages) == 1
+    assert context.input_messages[0].message == "Prompt 1"
+    assert context.input_messages[0].tokens == [100]
+
+    assert len(context.output_messages) == 3
+    assert context.output_messages[0].message == "alphabeta"
+    assert context.output_messages[0].tokens == [1, 2]
+    assert context.output_messages[1].message == "Prompt 2"
+    assert context.output_messages[1].tokens == [200]
+    assert context.output_messages[2].message == "gammadelta"
+    assert context.output_messages[2].tokens == [3, 4]

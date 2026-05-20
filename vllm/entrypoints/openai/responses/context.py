@@ -51,6 +51,24 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _decode_token_ids(
+    tokenizer: TokenizerLike | None,
+    token_ids: list[int] | tuple[int, ...],
+    fallback_text: str = "",
+) -> str:
+    if tokenizer is None or not token_ids:
+        return fallback_text
+
+    try:
+        return tokenizer.decode(token_ids, skip_special_tokens=False)
+    except TypeError:
+        return tokenizer.decode(token_ids)
+    except Exception:
+        logger.debug("Falling back to provided text while decoding tokens.", exc_info=True)
+        return fallback_text
+
+
 # This is currently needed as the tool type doesn't 1:1 match the
 # tool namespace, which is what is used to look up the
 # connection to the tool server
@@ -164,8 +182,9 @@ def _create_json_parse_error_messages(
 class SimpleContext(ConversationContext):
     """This is a context that cannot handle MCP tool calls"""
 
-    def __init__(self):
+    def __init__(self, tokenizer: TokenizerLike | None = None):
         self.last_output = None
+        self.tokenizer = tokenizer
 
         # Accumulated final output for streaming mode
         self._accumulated_text: str = ""
@@ -193,7 +212,8 @@ class SimpleContext(ConversationContext):
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
 
-        # Accumulate text, token_ids, and logprobs for streaming mode
+        # Keep raw text only as a fallback. The source of truth for the
+        # accumulated assistant-visible output is the token-id sequence.
         delta_output = output.outputs[0]
         self._accumulated_text += delta_output.text
         self._accumulated_token_ids.extend(delta_output.token_ids)
@@ -211,6 +231,14 @@ class SimpleContext(ConversationContext):
             )
 
     @property
+    def accumulated_text(self) -> str:
+        return _decode_token_ids(
+            self.tokenizer,
+            self._accumulated_token_ids,
+            self._accumulated_text,
+        )
+
+    @property
     def output_messages(self) -> list[ResponseRawMessageAndToken]:
         """Return consolidated output as a single message.
 
@@ -221,7 +249,7 @@ class SimpleContext(ConversationContext):
             return []
         return [
             ResponseRawMessageAndToken(
-                message=self._accumulated_text,
+                message=self.accumulated_text,
                 tokens=list(self._accumulated_token_ids),
             )
         ]
@@ -234,7 +262,7 @@ class SimpleContext(ConversationContext):
             final_output = copy.copy(self.last_output)
             # copy inner item to avoid modify last_output
             final_output.outputs = [replace(item) for item in self.last_output.outputs]
-            final_output.outputs[0].text = self._accumulated_text
+            final_output.outputs[0].text = self.accumulated_text
             final_output.outputs[0].token_ids = tuple(self._accumulated_token_ids)
             if self._accumulated_logprobs:
                 final_output.outputs[0].logprobs = self._accumulated_logprobs
@@ -300,6 +328,7 @@ class ParsableContext(ConversationContext):
         )
         self.tool_parser_cls = tool_parser_cls
         self.request = request
+        self.tokenizer = tokenizer
 
         self.available_tools = available_tools or []
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
@@ -312,6 +341,8 @@ class ParsableContext(ConversationContext):
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
         self._accumulated_token_ids: list[int] = []
+        self._current_output_message_index: int | None = None
+        self._raw_output_turn_finished = True
         self.kv_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
@@ -327,7 +358,14 @@ class ParsableContext(ConversationContext):
         # only store if enable_response_messages is True, save memory
         if self.request.enable_response_messages:
             output_prompt = output.prompt or ""
-            output_prompt_token_ids = output.prompt_token_ids or []
+            output_prompt_token_ids = list(output.prompt_token_ids or [])
+            output_token_ids = list(output.outputs[0].token_ids or [])
+            output_text = _decode_token_ids(
+                self.tokenizer,
+                output_token_ids,
+                output.outputs[0].text,
+            )
+
             if len(self.input_messages) == 0:
                 self.input_messages.append(
                     ResponseRawMessageAndToken(
@@ -335,19 +373,35 @@ class ParsableContext(ConversationContext):
                         tokens=output_prompt_token_ids,
                     )
                 )
-            else:
+            elif self._raw_output_turn_finished:
                 self.output_messages.append(
                     ResponseRawMessageAndToken(
                         message=output_prompt,
                         tokens=output_prompt_token_ids,
                     )
                 )
-            self.output_messages.append(
-                ResponseRawMessageAndToken(
-                    message=output.outputs[0].text,
-                    tokens=output.outputs[0].token_ids,
+                self._current_output_message_index = None
+
+            if self._current_output_message_index is None:
+                self.output_messages.append(
+                    ResponseRawMessageAndToken(
+                        message=output_text,
+                        tokens=output_token_ids,
+                    )
                 )
-            )
+                self._current_output_message_index = len(self.output_messages) - 1
+            else:
+                current_output_message = self.output_messages[
+                    self._current_output_message_index
+                ]
+                current_output_message.tokens.extend(output_token_ids)
+                current_output_message.message = _decode_token_ids(
+                    self.tokenizer,
+                    current_output_message.tokens,
+                    current_output_message.message + output_text,
+                )
+
+            self._raw_output_turn_finished = output.finished
 
     def append_tool_output(self, output: list[ResponseInputOutputItem]) -> None:
         self.parser.response_messages.extend(output)

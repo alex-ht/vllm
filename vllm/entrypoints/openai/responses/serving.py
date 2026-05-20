@@ -479,7 +479,7 @@ class OpenAIServingResponses(OpenAIServing):
                         chat_template_content_format=self.chat_template_content_format,
                     )
                 else:
-                    context = SimpleContext()
+                    context = SimpleContext(tokenizer=tokenizer)
 
             if self.parser and self.parser.reasoning_parser_cls is not None:
                 chat_template_kwargs = self._effective_chat_template_kwargs(request)
